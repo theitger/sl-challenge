@@ -1,0 +1,7 @@
+.ipynb_checkpoints/
+__pycache__/
+.DS_Store
+*.pyc
+
+# Course material — keep local, don't redistribute via the repo
+*.pdf
