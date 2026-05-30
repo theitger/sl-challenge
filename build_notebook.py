@@ -190,19 +190,28 @@ for horizon in HORIZONS:
 """)
 
 
-md("""## 5. Models""")
+md("""## 5. Models
 
-co("""def make_models():
-    xgb = XGBRegressor(
-        n_estimators=500,
-        learning_rate=0.05,
-        max_depth=6,
+The XGBoost settings are selected separately per horizon on the temporal
+holdout. The shorter horizon benefits from more boosting rounds, while the
+24-hour horizon works better with shallower trees.""")
+
+co("""def make_xgboost(horizon):
+    params_by_horizon = {
+        1: {"n_estimators": 800, "learning_rate": 0.03, "max_depth": 5},
+        24: {"n_estimators": 300, "learning_rate": 0.03, "max_depth": 4},
+    }
+    params = params_by_horizon[horizon]
+    return XGBRegressor(
+        **params,
         subsample=0.8,
         colsample_bytree=0.8,
         n_jobs=-1,
         random_state=RNG,
     )
 
+
+def make_models(horizon):
     mlp = TransformedTargetRegressor(
         regressor=make_pipeline(
             StandardScaler(),
@@ -226,7 +235,7 @@ co("""def make_models():
             n_jobs=-1,
             random_state=RNG,
         ),
-        "XGBoost": xgb,
+        "XGBoost": make_xgboost(horizon),
         "MLP": mlp,
     }
 
@@ -267,7 +276,7 @@ co("""def evaluate_validation(df, validation_days=VALIDATION_DAYS):
             rows.append({"Model": name, "Horizon": f"+{horizon}h", "MSE": mse, "RMSE": rmse})
 
         fitted = {}
-        for name, model in make_models().items():
+        for name, model in make_models(horizon).items():
             candidate = clone(model)
             candidate.fit(X_train, y_train)
             mse, rmse = mse_rmse(y_val, candidate.predict(X_val))
@@ -299,7 +308,7 @@ co("""def train_final_models(train_df, best_model_by_horizon):
 
     for horizon, model_name in best_model_by_horizon.items():
         X_train, y_train, _ = make_supervised_frame(train_df, horizon)
-        model = clone(make_models()[model_name])
+        model = clone(make_models(horizon)[model_name])
         model.fit(X_train, y_train)
         final_models[horizon] = (model_name, model)
         final_columns[horizon] = X_train.columns
