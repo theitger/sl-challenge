@@ -22,7 +22,7 @@ from sklearn.metrics import mean_squared_error
 from xgboost import XGBRegressor
 
 RNG = 0
-DATA = "challenge_public_dataset (1).xlsx"
+DATA = "challenge_public_dataset.xlsx"
 
 # ---------------------------------------------------------------- load + clean
 def load_clean(path):
