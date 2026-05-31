@@ -190,7 +190,11 @@ for horizon in HORIZONS:
 """)
 
 
-md("""## 5. Models""")
+md("""## 5. Models
+
+The `log1p` XGBoost variant trains on `log(1 + BikeCount)` and transforms
+predictions back with `expm1`. This reduces the influence of very large count
+peaks and is compared explicitly instead of being hard-coded.""")
 
 co("""def make_models():
     xgb = XGBRegressor(
@@ -227,6 +231,11 @@ co("""def make_models():
             random_state=RNG,
         ),
         "XGBoost": xgb,
+        "XGBoost log1p": TransformedTargetRegressor(
+            regressor=clone(xgb),
+            func=np.log1p,
+            inverse_func=np.expm1,
+        ),
         "MLP": mlp,
     }
 

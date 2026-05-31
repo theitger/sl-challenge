@@ -38,7 +38,8 @@ neural-network model.
 | naive lag168 | 45,525 | 45,525 |
 | Ridge | 11,582 | 28,223 |
 | RandomForest | 4,035 | 25,438 |
-| **XGBoost (best)** | **3,455** | **24,373** |
+| XGBoost | 3,455 | 24,373 |
+| **XGBoost log1p (best)** | **3,320** | **22,595** |
 | MLP | 9,303 | 39,635 |
 
 → XGBoost wins both horizons; every trained model beats the simple horizon-lag
