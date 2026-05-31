@@ -1,279 +1,366 @@
 """Generate the submission notebook bike_count_estimation.ipynb."""
 import nbformat as nbf
-from nbformat.v4 import new_notebook, new_markdown_cell, new_code_cell
+from nbformat.v4 import new_code_cell, new_markdown_cell, new_notebook
+
 
 cells = []
-md = lambda s: cells.append(new_markdown_cell(s))
-co = lambda s: cells.append(new_code_cell(s))
 
-md("""# Bike Count Estimation — Supervised Learning Challenge
 
-**Task.** Predict the hourly `BikeCount` for the city of Münster from one year of
-hourly data, and compare model families across two forecast horizons.
+def md(source):
+    cells.append(new_markdown_cell(source))
 
-**Forecast framing (direct multi-step).** Each row carries its own calendar and
-weather columns. The two horizons differ *only* in which lagged BikeCounts are
-available at the forecast origin:
 
-| Horizon | Available lags | Idea |
-|---|---|---|
-| **+1 h**  | lag ≥ 1   | the most recent count is known (autocorr ≈ 0.91) |
-| **+24 h** | lag ≥ 24  | nothing from the previous 24 h is known yet |
+def co(source):
+    cells.append(new_code_cell(source))
 
-**Models compared** (one per family, as required): **Ridge** (linear),
-**Random Forest** & **XGBoost** (tree-based), **MLP** (neural network), against
-**naive baselines** (persistence and weekly-seasonal).
 
-**Metric.** Mean Squared Error (MSE).
+md("""# Bike Count Estimation - Supervised Learning Challenge
 
-**Deliverable behaviour.** This notebook (1) loads a dataset, (2) trains and
-selects the best model per horizon on the public data, then (3) applies that
-model to the held-out test set and reports its MSE. It is written to run *blind*
-on the hidden test set delivered on June 3rd — it only assumes the same column
-format and a contiguous hourly series.""")
+This notebook predicts hourly bike counts in Muenster for two direct forecast
+horizons:
+
+| Horizon | Meaning |
+|---|---|
+| `+1h` | predict `BikeCount(t+1)` from information available at time `t` |
+| `+24h` | predict `BikeCount(t+24)` from information available at time `t` |
+
+So the 24-hour task is **not** the sum over the next 24 hours. It is the bike
+count of the hour 24 hours in the future.
+
+We compare one linear model, tree-based models, and one neural network. The
+metric is mean squared error (MSE).""")
+
+
+md("""## 1. Imports & setup""")
 
 co("""import warnings
 warnings.filterwarnings("ignore")
+
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import Ridge
+
+from sklearn.base import clone
+from sklearn.compose import TransformedTargetRegressor
 from sklearn.ensemble import RandomForestRegressor
+from sklearn.linear_model import Ridge
+from sklearn.metrics import mean_squared_error
 from sklearn.neural_network import MLPRegressor
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
-from sklearn.compose import TransformedTargetRegressor
-from sklearn.metrics import mean_squared_error
 from xgboost import XGBRegressor
 
 RNG = 0
-
-# Public training data (shipped with this notebook).
-TRAIN_PATH = "challenge_public_dataset (1).xlsx"
-
-# Hidden test set, delivered on June 3rd. Same format as the public dataset.
-# >>> On June 3rd, set this to the path of the provided test file. <<<
-# It defaults to the public dataset so the notebook runs end-to-end as a check.
-TEST_PATH = "challenge_public_dataset (1).xlsx"
+HORIZONS = [1, 24]
+VALIDATION_DAYS = 61
 """)
 
-md("""## 1. Load & clean
 
-The raw file contains exactly one corrupt row (`Weather Condition Null`, all
-sensor values `NaN`) which is also the only duplicated `(Month, Day, Hour)`
-timestamp. Dropping it fixes both issues at once and leaves 8759 unique hourly
-rows. We sort chronologically so lag features shift correctly.""")
+md("""## 2. Input paths & configuration
 
-co("""REQUIRED_COLS = ["Month", "Day", "Hour", "Weekday", "Weather",
-                 "Temperature (°C)", "Humidity (%)", "Rain (mm)", "Wind (km/h)", "BikeCount"]
+On June 3rd, set `TEST_PATH` to the hidden test file and run the final section.
+Until then it stays `None`, so the notebook cannot accidentally print
+in-sample test scores from the public training data.""")
 
-def load_clean(path):
+co("""TRAIN_PATH = "challenge_public_dataset.xlsx"
+TEST_PATH = None  # Example on June 3rd: "challenge_hidden_test_dataset.xlsx"
+
+REQUIRED_COLS = [
+    "Month", "Day", "Hour", "Weekday", "Weather",
+    "Temperature (°C)", "Humidity (%)", "Rain (mm)", "Wind (km/h)", "BikeCount",
+]
+WEATHER_CATS = ["Thunder", "Snow", "Rain", "Fog", "Clear", "Cloudy", "Other"]
+""")
+
+
+md("""## 3. Load and validate data""")
+
+co("""def load_clean(path):
     df = pd.read_excel(path)
-    df.columns = df.columns.str.strip()                   # tolerate stray whitespace
-    missing = [c for c in REQUIRED_COLS if c not in df.columns]
-    if missing:                                           # fail loudly, not silently
-        raise ValueError(
-            f"Input file is missing expected columns {missing}. "
-            f"Got {list(df.columns)}. The file must have the same format as the "
-            f"public dataset.")
-    df = df.dropna(subset=["BikeCount"]).copy()           # drop corrupt/duplicate row
-    df = df.sort_values(["Month", "Day", "Hour"]).reset_index(drop=True)  # assumes one contiguous year
+    df.columns = df.columns.str.strip()
+
+    missing = [col for col in REQUIRED_COLS if col not in df.columns]
+    if missing:
+        raise ValueError(f"Missing expected columns {missing}. Got {list(df.columns)}")
+
+    # The public data contains one corrupt row with NaN BikeCount and sensor values.
+    df = df.dropna(subset=["BikeCount"]).copy()
+    df = df.sort_values(["Month", "Day", "Hour"]).reset_index(drop=True)
+
+    duplicate_count = df.duplicated(["Month", "Day", "Hour"]).sum()
+    if duplicate_count:
+        raise ValueError(f"Found {duplicate_count} duplicated timestamps after cleaning.")
+
     return df
 
+
 train_df = load_clean(TRAIN_PATH)
-print(f"clean rows: {len(train_df)}  |  columns: {list(train_df.columns)}")
+print(f"Clean public rows: {len(train_df)}")
+print(f"Date range: {train_df.iloc[0][['Month', 'Day', 'Hour']].to_dict()} -> "
+      f"{train_df.iloc[-1][['Month', 'Day', 'Hour']].to_dict()}")
 train_df.head()
 """)
 
-md("""## 2. Feature engineering
 
-**Calendar.** Raw `Hour/Weekday/Month` (for trees) plus cyclical sin/cos
-encodings (for linear/MLP) and an `is_weekend` flag (Weekday 5 & 6, where the
-commute peak collapses).
+md("""## 4. Feature engineering
 
-**Weather.** The 35 messy free-text categories are reduced to 7 stable buckets
-by keyword — robust to unseen strings in the hidden test set, unlike one-hot on
-the raw text.
+The supervised target is explicit: for horizon `h`, the target is
+`BikeCount.shift(-h)`, i.e. `BikeCount(t+h)`.
 
-**Lags (the core of the time-series signal).** Autocorrelation is strong
-(lag-1 ≈ 0.91, lag-24 ≈ 0.81, lag-168 ≈ 0.89), so lagged BikeCounts and rolling
-means dominate. Which lags are allowed depends on the horizon (see top table).
+Calendar and weather features describe the target hour `t+h`, because those
+columns are available for each row in the challenge file. BikeCount lag
+features are restricted to values known at forecast origin `t` or earlier.""")
 
-**Boundary imputation.** The first rows of any series lack lag history. Missing
-lags are filled with the per-`(Hour, is_weekend)` mean BikeCount learned on the
-training data, so every test row gets a prediction (no silent row dropping).""")
-
-co("""WEATHER_CATS = ["Thunder", "Snow", "Rain", "Fog", "Clear", "Cloudy", "Other"]
-
-def weather_bucket(s):
-    s = str(s).lower()
-    if "thunder" in s:                                  return "Thunder"
-    if "snow" in s or "ice" in s or "sleet" in s:       return "Snow"
-    if "rain" in s or "drizzle" in s or "shower" in s:  return "Rain"
-    if "fog" in s:                                      return "Fog"
-    if "sunny" in s or "clear" in s:                    return "Clear"
-    if "cloud" in s or "overcast" in s:                 return "Cloudy"
+co("""def weather_bucket(value):
+    text = str(value).lower()
+    if "thunder" in text:
+        return "Thunder"
+    if "snow" in text or "ice" in text or "sleet" in text:
+        return "Snow"
+    if "rain" in text or "drizzle" in text or "shower" in text:
+        return "Rain"
+    if "fog" in text:
+        return "Fog"
+    if "sunny" in text or "clear" in text:
+        return "Clear"
+    if "cloud" in text or "overcast" in text:
+        return "Cloudy"
     return "Other"
 
-def build_features(df, horizon):
-    # Return (X, y, lagcols) for a horizon. df must be cleaned + sorted.
+
+def make_supervised_frame(df, horizon):
     d = df.copy()
-    d["is_weekend"] = d["Weekday"].isin([5, 6]).astype(int)
-    d["hour_sin"]  = np.sin(2 * np.pi * d["Hour"]  / 24)
-    d["hour_cos"]  = np.cos(2 * np.pi * d["Hour"]  / 24)
-    d["month_sin"] = np.sin(2 * np.pi * d["Month"] / 12)
-    d["month_cos"] = np.cos(2 * np.pi * d["Month"] / 12)
 
-    cat = pd.Categorical(d["Weather"].map(weather_bucket), categories=WEATHER_CATS)
-    wdum = pd.get_dummies(cat, prefix="w").astype(int)    # stable 7 columns
+    d["target"] = d["BikeCount"].shift(-horizon)
 
-    bc = d["BikeCount"]
-    lags = [1, 2, 3, 24, 168] if horizon == 1 else [24, 25, 48, 168]
-    for L in lags:
-        d[f"lag{L}"] = bc.shift(L)
+    d["target_hour"] = d["Hour"].shift(-horizon)
+    d["target_weekday"] = d["Weekday"].shift(-horizon)
+    d["target_month"] = d["Month"].shift(-horizon)
+    d["target_temperature"] = d["Temperature (°C)"].shift(-horizon)
+    d["target_humidity"] = d["Humidity (%)"].shift(-horizon)
+    d["target_rain"] = d["Rain (mm)"].shift(-horizon)
+    d["target_wind"] = d["Wind (km/h)"].shift(-horizon)
+    d["target_weather"] = d["Weather"].shift(-horizon)
+
+    d["target_is_weekend"] = d["target_weekday"].isin([5, 6]).astype(int)
+    d["target_hour_sin"] = np.sin(2 * np.pi * d["target_hour"] / 24)
+    d["target_hour_cos"] = np.cos(2 * np.pi * d["target_hour"] / 24)
+    d["target_month_sin"] = np.sin(2 * np.pi * d["target_month"] / 12)
+    d["target_month_cos"] = np.cos(2 * np.pi * d["target_month"] / 12)
+
+    weather = pd.Categorical(d["target_weather"].map(weather_bucket), categories=WEATHER_CATS)
+    weather_dummies = pd.get_dummies(weather, prefix="weather").astype(int)
+
+    def target_lag(lag):
+        shift = lag - horizon
+        if shift < 0:
+            raise ValueError(f"target lag {lag} is not known for horizon {horizon}")
+        return d["BikeCount"].shift(shift)
+
+    target_lags = [1, 2, 3, 24, 168] if horizon == 1 else [24, 25, 48, 168]
+    lag_cols = []
+    for lag in target_lags:
+        col = f"bike_count_target_minus_{lag}"
+        d[col] = target_lag(lag)
+        lag_cols.append(col)
+
+    d["rolling_24h_mean"] = target_lag(horizon).rolling(24).mean()
+    rolling_cols = ["rolling_24h_mean"]
     if horizon == 1:
-        d["roll3"]  = bc.shift(1).rolling(3).mean()
-        d["roll24"] = bc.shift(1).rolling(24).mean()
-        rollcols = ["roll3", "roll24"]
-    else:
-        d["roll24"] = bc.shift(24).rolling(24).mean()
-        rollcols = ["roll24"]
+        d["rolling_3h_mean"] = target_lag(horizon).rolling(3).mean()
+        rolling_cols = ["rolling_3h_mean", "rolling_24h_mean"]
 
-    base = ["Hour", "Weekday", "Month", "is_weekend",
-            "hour_sin", "hour_cos", "month_sin", "month_cos",
-            "Temperature (°C)", "Humidity (%)", "Rain (mm)", "Wind (km/h)"]
-    lagcols = [f"lag{L}" for L in lags] + rollcols
-    X = pd.concat([d[base], wdum, d[lagcols]], axis=1)
-    return X, bc, lagcols
+    feature_cols = [
+        "target_hour", "target_weekday", "target_month", "target_is_weekend",
+        "target_hour_sin", "target_hour_cos", "target_month_sin", "target_month_cos",
+        "target_temperature", "target_humidity", "target_rain", "target_wind",
+        *lag_cols, *rolling_cols,
+    ]
 
-def fit_impute(df_train):
-    tmp = df_train.copy()
-    tmp["is_weekend"] = tmp["Weekday"].isin([5, 6]).astype(int)
-    grp  = tmp.groupby(["Hour", "is_weekend"])["BikeCount"].mean()
-    glob = tmp["BikeCount"].mean()
-    return grp, glob
+    supervised = pd.concat([d[feature_cols + ["target"]], weather_dummies], axis=1)
+    supervised = supervised.dropna().reset_index(drop=True)
 
-def apply_impute(X, rows, lagcols, grp, glob):
-    X = X.copy()
-    key = list(zip(rows["Hour"], rows["Weekday"].isin([5, 6]).astype(int)))
-    fill = pd.Series([grp.get(k, glob) for k in key], index=X.index)
-    for c in lagcols:
-        X[c] = X[c].fillna(fill)
-    return X
+    X = supervised.drop(columns=["target"])
+    y = supervised["target"]
+    return X, y, supervised
+
+
+for horizon in HORIZONS:
+    X_check, y_check, _ = make_supervised_frame(train_df, horizon)
+    print(f"+{horizon}h supervised rows: {len(X_check)} | features: {X_check.shape[1]}")
 """)
 
-md("""## 3. Model definitions
 
-The Ridge `alpha`, the MLP architecture, and the XGBoost settings were chosen on
-the temporal holdout below. The MLP standardises both inputs and target. The
-**best model** uses XGBoost; for the harder +24 h horizon a `log1p` target
-transform gave a lower holdout MSE, so it is applied there.""")
+md("""## 5. Models
+
+The `log1p` XGBoost variant trains on `log(1 + BikeCount)` and transforms
+predictions back with `expm1`. This reduces the influence of very large count
+peaks and is compared explicitly instead of being hard-coded.""")
 
 co("""def make_models():
-    mlp = lambda: TransformedTargetRegressor(
-        regressor=make_pipeline(StandardScaler(),
-            MLPRegressor(hidden_layer_sizes=(128, 64, 32), alpha=1e-3,
-                         learning_rate_init=0.005, max_iter=800,
-                         early_stopping=True, n_iter_no_change=20, random_state=RNG)),
-        transformer=StandardScaler())
+    xgb = XGBRegressor(
+        n_estimators=500,
+        learning_rate=0.05,
+        max_depth=6,
+        subsample=0.8,
+        colsample_bytree=0.8,
+        n_jobs=-1,
+        random_state=RNG,
+    )
+
+    mlp = TransformedTargetRegressor(
+        regressor=make_pipeline(
+            StandardScaler(),
+            MLPRegressor(
+                hidden_layer_sizes=(128, 64, 32),
+                alpha=1e-3,
+                learning_rate_init=0.005,
+                max_iter=800,
+                early_stopping=True,
+                n_iter_no_change=20,
+                random_state=RNG,
+            ),
+        ),
+        transformer=StandardScaler(),
+    )
+
     return {
-        "Ridge":        make_pipeline(StandardScaler(), Ridge(alpha=1.0)),
-        "RandomForest": RandomForestRegressor(n_estimators=300, n_jobs=-1, random_state=RNG),
-        "XGBoost":      XGBRegressor(n_estimators=500, learning_rate=0.05, max_depth=6,
-                                     subsample=0.8, colsample_bytree=0.8,
-                                     n_jobs=-1, random_state=RNG),
-        "MLP":          mlp(),
+        "Ridge": make_pipeline(StandardScaler(), Ridge(alpha=1.0)),
+        "RandomForest": RandomForestRegressor(
+            n_estimators=300,
+            n_jobs=-1,
+            random_state=RNG,
+        ),
+        "XGBoost": xgb,
+        "XGBoost log1p": TransformedTargetRegressor(
+            regressor=clone(xgb),
+            func=np.log1p,
+            inverse_func=np.expm1,
+        ),
+        "MLP": mlp,
     }
 
-def best_model(horizon):
-    # Selected best model per horizon (XGBoost; log1p target for the +24 h case).
-    xgb = XGBRegressor(n_estimators=500, learning_rate=0.05, max_depth=6,
-                       subsample=0.8, colsample_bytree=0.8, n_jobs=-1, random_state=RNG)
-    if horizon == 24:
-        return TransformedTargetRegressor(regressor=xgb, func=np.log1p, inverse_func=np.expm1)
-    return xgb
+
+def mse_rmse(y_true, y_pred):
+    pred = np.clip(y_pred, 0, None)
+    mse = mean_squared_error(y_true, pred)
+    return mse, np.sqrt(mse)
 """)
 
-md("""## 4. Model comparison (temporal holdout)
 
-We validate on the **last 61 days** of the public year and train on the rest —
-a temporal split, never a random k-fold, which would leak future information
-through the lag features. Numbers below are the validation MSE used for the
-results slide.""")
+md("""## 6. Validation results
 
-co("""def evaluate_holdout(df, n_val_days=61):
-    split = len(df) - 24 * n_val_days
-    df_tr = df.iloc[:split]
-    rows = {}
-    for horizon in (1, 24):
-        X, y, lagcols = build_features(df, horizon)
-        grp, glob = fit_impute(df_tr)
-        Xtr = apply_impute(X.iloc[:split], df.iloc[:split], lagcols, grp, glob)
-        Xva = apply_impute(X.iloc[split:], df.iloc[split:], lagcols, grp, glob)
-        ytr, yva = y.iloc[:split], y.iloc[split:]
+We use a temporal holdout: the last 61 days are validation data. A random split
+would mix future and past observations and is inappropriate for this time
+series task.""")
 
-        naive_lag = 1 if horizon == 1 else 24
-        res = {
-            f"naive (lag{naive_lag})": mean_squared_error(yva, y.shift(naive_lag).iloc[split:].fillna(glob)),
-            "naive (lag168)":          mean_squared_error(yva, y.shift(168).iloc[split:].fillna(glob)),
+co("""def evaluate_validation(df, validation_days=VALIDATION_DAYS):
+    rows = []
+    best_models = {}
+
+    for horizon in HORIZONS:
+        X, y, supervised = make_supervised_frame(df, horizon)
+        split = len(X) - validation_days * 24
+        if split <= 0:
+            raise ValueError("Validation window is larger than the supervised dataset.")
+
+        X_train, X_val = X.iloc[:split], X.iloc[split:]
+        y_train, y_val = y.iloc[:split], y.iloc[split:]
+        frame_val = supervised.iloc[split:]
+
+        baselines = {
+            f"naive target lag {horizon}": frame_val[f"bike_count_target_minus_{horizon}"],
+            "naive target lag 168": frame_val["bike_count_target_minus_168"],
         }
-        for name, mdl in make_models().items():
-            mdl.fit(Xtr, ytr)
-            res[name] = mean_squared_error(yva, np.clip(mdl.predict(Xva), 0, None))
-        rows[f"{horizon}h"] = res
-    return pd.DataFrame(rows).round(1)
+        for name, pred in baselines.items():
+            mse, rmse = mse_rmse(y_val, pred)
+            rows.append({"Model": name, "Horizon": f"+{horizon}h", "MSE": mse, "RMSE": rmse})
 
-comparison = evaluate_holdout(train_df)
-print("Validation MSE (last 61 days):")
-comparison
+        fitted = {}
+        for name, model in make_models().items():
+            candidate = clone(model)
+            candidate.fit(X_train, y_train)
+            mse, rmse = mse_rmse(y_val, candidate.predict(X_val))
+            rows.append({"Model": name, "Horizon": f"+{horizon}h", "MSE": mse, "RMSE": rmse})
+            fitted[name] = (candidate, mse)
+
+        best_name = min(fitted, key=lambda model_name: fitted[model_name][1])
+        best_models[horizon] = best_name
+
+    results = pd.DataFrame(rows).sort_values(["Horizon", "MSE"]).reset_index(drop=True)
+    return results, best_models
+
+
+validation_results, best_model_by_horizon = evaluate_validation(train_df)
+display(validation_results.round({"MSE": 1, "RMSE": 1}))
+print("Best model by horizon:", best_model_by_horizon)
 """)
 
-md("""## 5. Best model — train on all public data, evaluate on the test set
 
-The selected model (XGBoost) is refit on the **full** public dataset for each
-horizon, then applied to the test set loaded from `TEST_PATH`. Lag features for
-the test set are built from its own BikeCount history; boundary rows use the
-training imputation. Predictions are clipped at 0 (counts are non-negative).
+md("""## 7. Hidden test evaluation
 
-**On June 3rd:** point `TEST_PATH` to the provided test file and re-run — the
-two MSE values printed below are the hidden-test results for the presentation.""")
+On June 3rd, set `TEST_PATH` above and run this section. The hidden file is
+expected to have the same columns as the public dataset, including `BikeCount`,
+so the final MSE/RMSE can be computed locally.""")
 
-co("""def evaluate_on_test(train_df, test_df):
-    grp, glob = fit_impute(train_df)             # imputation stats from public data
-    results = {}
-    for horizon in (1, 24):
-        Xtr, ytr, lagcols = build_features(train_df, horizon)
-        Xtr = apply_impute(Xtr, train_df, lagcols, grp, glob)
+co("""def train_final_models(train_df, best_model_by_horizon):
+    final_models = {}
+    final_columns = {}
 
-        Xte, yte, _ = build_features(test_df, horizon)
-        Xte = apply_impute(Xte, test_df, lagcols, grp, glob)
-        Xte = Xte.reindex(columns=Xtr.columns, fill_value=0)   # align columns defensively
+    for horizon, model_name in best_model_by_horizon.items():
+        X_train, y_train, _ = make_supervised_frame(train_df, horizon)
+        model = clone(make_models()[model_name])
+        model.fit(X_train, y_train)
+        final_models[horizon] = (model_name, model)
+        final_columns[horizon] = X_train.columns
 
-        model = best_model(horizon)
-        model.fit(Xtr, ytr)
-        pred = np.clip(model.predict(Xte), 0, None)
-        results[horizon] = mean_squared_error(yte, pred)
-    return results
+    return final_models, final_columns
 
-test_df = load_clean(TEST_PATH)
-mse = evaluate_on_test(train_df, test_df)
 
-print("=" * 46)
-print(f"  Test MSE  (+1 h horizon) : {mse[1]:12.2f}")
-print(f"  Test MSE  (+24 h horizon): {mse[24]:12.2f}")
-print("=" * 46)
-if TEST_PATH == TRAIN_PATH:
-    print("\\n!!! WARNING: these are NOT the real test scores. TEST_PATH still points")
-    print("    to the public dataset, so the model is evaluated in-sample (it was")
-    print("    trained on the same rows) -> the MSE is optimistically low.")
-    print("    On June 3rd set TEST_PATH to the hidden test file and re-run.")
-    print("    Realistic out-of-sample expectation ~ the holdout table above")
-    print("    (XGBoost: ~3200 for +1h, ~21500 for +24h).")
+def evaluate_hidden_test(train_df, test_path, best_model_by_horizon):
+    test_df = load_clean(test_path)
+    final_models, final_columns = train_final_models(train_df, best_model_by_horizon)
+
+    rows = []
+    predictions = {}
+    for horizon in HORIZONS:
+        X_test, y_test, _ = make_supervised_frame(test_df, horizon)
+        X_test = X_test.reindex(columns=final_columns[horizon], fill_value=0)
+
+        model_name, model = final_models[horizon]
+        pred = np.clip(model.predict(X_test), 0, None)
+        predictions[horizon] = pred
+
+        mse, rmse = mse_rmse(y_test, pred)
+        rows.append({"Model": model_name, "Horizon": f"+{horizon}h", "MSE": mse, "RMSE": rmse})
+
+    return pd.DataFrame(rows), predictions
+
+
+if TEST_PATH is None:
+    print("TEST_PATH is not set. Set it on June 3rd to evaluate the hidden test dataset.")
+else:
+    hidden_results, hidden_predictions = evaluate_hidden_test(
+        train_df,
+        TEST_PATH,
+        best_model_by_horizon,
+    )
+    display(hidden_results.round({"MSE": 2, "RMSE": 2}))
 """)
 
-nb = new_notebook(cells=cells, metadata={
-    "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
-    "language_info": {"name": "python", "version": "3"},
-})
+
+nb = new_notebook(
+    cells=cells,
+    metadata={
+        "kernelspec": {
+            "display_name": "Python 3",
+            "language": "python",
+            "name": "python3",
+        },
+        "language_info": {"name": "python", "version": "3"},
+    },
+)
+
 with open("bike_count_estimation.ipynb", "w") as f:
     nbf.write(nb, f)
+
 print("wrote bike_count_estimation.ipynb with", len(cells), "cells")
