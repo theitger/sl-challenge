@@ -192,12 +192,35 @@ for horizon in HORIZONS:
 
 md("""## 5. Models
 
-The `log1p` XGBoost variant trains on `log(1 + BikeCount)` and transforms
-predictions back with `expm1`. This reduces the influence of very large count
-peaks and is compared explicitly instead of being hard-coded.""")
+We compare a few XGBoost configurations explicitly instead of hard-coding one:
 
-co("""def make_models():
-    xgb = XGBRegressor(
+- **XGBoost**: a single default configuration for both horizons.
+- **XGBoost tuned**: hyper-parameters selected separately per forecast horizon
+  on the temporal holdout. The +1h horizon benefits from more, slower boosting
+  rounds; the +24h horizon from shallower trees.
+- the **`log1p`** variants train on `log(1 + BikeCount)` and transform
+  predictions back with `expm1`, which dampens the influence of very large
+  count peaks.
+
+The validation step below picks the best of all candidates per horizon, so the
+choice between tuned / default / log1p is data-driven, not assumed.""")
+
+co("""def make_xgboost(horizon):
+    params_by_horizon = {
+        1: {"n_estimators": 800, "learning_rate": 0.03, "max_depth": 5},
+        24: {"n_estimators": 300, "learning_rate": 0.03, "max_depth": 4},
+    }
+    return XGBRegressor(
+        **params_by_horizon[horizon],
+        subsample=0.8,
+        colsample_bytree=0.8,
+        n_jobs=-1,
+        random_state=RNG,
+    )
+
+
+def make_xgboost_baseline():
+    return XGBRegressor(
         n_estimators=500,
         learning_rate=0.05,
         max_depth=6,
@@ -207,6 +230,16 @@ co("""def make_models():
         random_state=RNG,
     )
 
+
+def log1p_wrap(model):
+    return TransformedTargetRegressor(
+        regressor=clone(model),
+        func=np.log1p,
+        inverse_func=np.expm1,
+    )
+
+
+def make_models(horizon):
     mlp = TransformedTargetRegressor(
         regressor=make_pipeline(
             StandardScaler(),
@@ -223,6 +256,8 @@ co("""def make_models():
         transformer=StandardScaler(),
     )
 
+    baseline = make_xgboost_baseline()
+    tuned = make_xgboost(horizon)
     return {
         "Ridge": make_pipeline(StandardScaler(), Ridge(alpha=1.0)),
         "RandomForest": RandomForestRegressor(
@@ -230,12 +265,10 @@ co("""def make_models():
             n_jobs=-1,
             random_state=RNG,
         ),
-        "XGBoost": xgb,
-        "XGBoost log1p": TransformedTargetRegressor(
-            regressor=clone(xgb),
-            func=np.log1p,
-            inverse_func=np.expm1,
-        ),
+        "XGBoost": baseline,
+        "XGBoost log1p": log1p_wrap(baseline),
+        "XGBoost tuned": tuned,
+        "XGBoost tuned log1p": log1p_wrap(tuned),
         "MLP": mlp,
     }
 
@@ -276,7 +309,7 @@ co("""def evaluate_validation(df, validation_days=VALIDATION_DAYS):
             rows.append({"Model": name, "Horizon": f"+{horizon}h", "MSE": mse, "RMSE": rmse})
 
         fitted = {}
-        for name, model in make_models().items():
+        for name, model in make_models(horizon).items():
             candidate = clone(model)
             candidate.fit(X_train, y_train)
             mse, rmse = mse_rmse(y_val, candidate.predict(X_val))
@@ -308,7 +341,7 @@ co("""def train_final_models(train_df, best_model_by_horizon):
 
     for horizon, model_name in best_model_by_horizon.items():
         X_train, y_train, _ = make_supervised_frame(train_df, horizon)
-        model = clone(make_models()[model_name])
+        model = clone(make_models(horizon)[model_name])
         model.fit(X_train, y_train)
         final_models[horizon] = (model_name, model)
         final_columns[horizon] = X_train.columns
