@@ -39,11 +39,22 @@ neural-network model.
 | Ridge | 11,582 | 28,223 |
 | RandomForest | 4,035 | 25,438 |
 | XGBoost | 3,455 | 24,373 |
-| **XGBoost log1p (best)** | **3,320** | **22,595** |
+| XGBoost log1p | 3,320 | 22,595 |
+| XGBoost tuned | 3,332 | 22,660 |
+| **XGBoost tuned log1p (best)** | **3,220** | **19,988** |
 | MLP | 9,303 | 39,635 |
 
 → XGBoost wins both horizons; every trained model beats the simple horizon-lag
 baseline. Classic finding: boosted trees > NN on small tabular data.
+
+**On tuning (`XGBoost tuned`):** XGBoost hyper-parameters are selected separately
+per horizon. A rolling-origin backtest over the whole year (not just the 61-day
+holdout) confirms the per-horizon tuning is a *robust* improvement over the
+default — it beats it in the majority of windows at both horizons. The `log1p`
+target transform, by contrast, mainly helps on high-peak periods (it wins the
+recent holdout but is noisier across the year), so the combined
+`tuned log1p` is the validation-best but not unconditionally dominant. The
+notebook lets the temporal holdout pick per horizon rather than hard-coding it.
 
 ## Run the notebook
 
@@ -67,9 +78,8 @@ print fake test scores.
 
 - [ ] **Slides** (2): approach + results. Numbers above are ready to use as
       validation numbers until the hidden test set is available.
-- [ ] **Optional tuning** (XGBoost with TimeSeriesSplit). Left out on purpose:
-      gain ~5–15% MSE, changes nothing for pass/fail, and risks overfitting to
-      the winter holdout. Discussion point.
+- [x] **Per-horizon XGBoost tuning** — added and backtested (see Results note).
+      Marginal for pass/fail, but a clean methodology point for the approach slide.
 - [ ] Check the assumption: the test set has the exact same column names,
       includes `BikeCount`, and is a single contiguous hourly series sortable by
       `(Month, Day, Hour)`.
