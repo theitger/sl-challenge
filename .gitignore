@@ -5,3 +5,7 @@ __pycache__/
 
 # Course material — keep local, don't redistribute via the repo
 *.pdf
+
+# generated backtest artifacts
+*.log
+backtest_*_results.csv

@@ -27,34 +27,42 @@ neural-network model.
   BikeCount lags, and rolling means.
 - **Cleaning:** exactly one corrupt row (`Weather Condition Null`, all-NaN, and
   also the only duplicate timestamp) is removed → 8759 rows.
-- **Validation:** temporal holdout (last 61 days), **no** random k-fold (it
-  would leak future information through the lag features).
+- **Validation / selection:** model selection runs on **leakage-free
+  rolling-origin time-series cross-validation** (expanding window, 14-day test
+  blocks). A single temporal holdout (last 61 days) is reported as an
+  independent control. **No** random k-fold — it would leak future bike counts
+  into the training folds through the lag/rolling features. Selection criterion:
+  **mean MSE across all rolling-origin windows**.
 
-## Results (validation MSE, last 61 days — NOT the real test MSE)
+## Results (rolling-origin CV MSE — NOT the real test MSE)
 
-| Model | +1 h | +24 h |
-|---|---|---|
-| naive horizon lag | 22,138 | 60,513 |
-| naive lag168 | 45,525 | 45,525 |
-| Ridge | 11,582 | 28,223 |
-| RandomForest | 4,035 | 25,438 |
-| XGBoost | 3,455 | 24,373 |
-| XGBoost log1p | 3,320 | 22,595 |
-| XGBoost tuned | 3,332 | 22,660 |
-| **XGBoost tuned log1p (best)** | **3,220** | **19,988** |
-| MLP | 9,303 | 39,635 |
+CV mean/median MSE per model, averaged over 14 rolling-origin windows per horizon:
 
-→ XGBoost wins both horizons; every trained model beats the simple horizon-lag
-baseline. Classic finding: boosted trees > NN on small tabular data.
+| Model | +1 h (mean) | +1 h (median) | +24 h (mean) | +24 h (median) |
+|---|---|---|---|---|
+| **XGBoost tuned (selected)** | **4,370** | 4,111 | **13,890** | **10,768** |
+| XGBoost | 4,459 | 4,169 | 14,583 | 12,480 |
+| XGBoost log1p | 4,652 | 4,044 | 19,569 | 12,273 |
+| XGBoost tuned log1p | 4,686 | 4,294 | 16,534 | 11,227 |
+| RandomForest | 5,263 | 4,979 | 14,681 | 12,366 |
+| MLP | 7,657 | 6,565 | 22,316 | 21,238 |
+| Ridge | 10,803 | 10,052 | 19,096 | 16,028 |
 
-**On tuning (`XGBoost tuned`):** XGBoost hyper-parameters are selected separately
-per horizon. A rolling-origin backtest over the whole year (not just the 61-day
-holdout) confirms the per-horizon tuning is a *robust* improvement over the
-default — it beats it in the majority of windows at both horizons. The `log1p`
-target transform, by contrast, mainly helps on high-peak periods (it wins the
-recent holdout but is noisier across the year), so the combined
-`tuned log1p` is the validation-best but not unconditionally dominant. The
-notebook lets the temporal holdout pick per horizon rather than hard-coding it.
+→ **XGBoost wins both horizons under CV and the holdout** — Ridge (linear),
+RandomForest, and MLP (neural net) lose under both. The two validation schemes
+agree on the winning *family*; they differ only on one detail inside XGBoost
+(below). Classic finding: boosted trees > NN on small tabular data.
+
+**On `log1p` (CV vs holdout disagreement, handled transparently):** the
+`log1p` target transform wins the single recent 61-day **holdout**, but across
+the full year it is *noisier* — at +1h it is the **worst** of the four XGBoost
+variants by mean CV MSE, and per-horizon CV selects plain **`XGBoost tuned`**
+(no transform) at both horizons. Because the hidden test set spans a similar
+multi-season range, we follow the lower-variance CV criterion and ship
+`XGBoost tuned`. The holdout's `tuned log1p` pick is reported as a control, not
+used for selection.
+
+Reproduce the full selection backtest standalone: `python3 backtest_selection.py`.
 
 ## Run the notebook
 
@@ -80,13 +88,20 @@ print fake test scores.
       validation numbers until the hidden test set is available.
 - [x] **Per-horizon XGBoost tuning** — added and backtested (see Results note).
       Marginal for pass/fail, but a clean methodology point for the approach slide.
-- [ ] Check the assumption: the test set has the exact same column names,
-      includes `BikeCount`, and is a single contiguous hourly series sortable by
-      `(Month, Day, Hour)`.
+- [x] **Selection on rolling-origin time-series CV** — model selection moved from
+      the single holdout to leakage-free rolling-origin CV; holdout kept as a
+      control. CV selects `XGBoost tuned` at both horizons.
+- [x] Test-set assumption: instructor confirmed the hidden set "looks similar to
+      the public dataset" and **includes `BikeCount`** (so local MSE is
+      computable). Still assumed: same column names, single contiguous hourly
+      series sortable by `(Month, Day, Hour)`.
 
 ## Files
 
 - `bike_count_estimation.ipynb` — submission notebook (self-contained).
+- `backtest_selection.py` — standalone rolling-origin CV over all model families
+  (reproduces the notebook's selection); `backtest_tuning.py` — the earlier
+  tuning-only backtest.
 - `build_notebook.py` — generates the notebook (dev, optional).
 - `prototype.py` — quick validation script (dev, optional).
 - `challenge_public_dataset.xlsx` — public training dataset.
