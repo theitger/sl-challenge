@@ -106,9 +106,13 @@ md("""## 4. Feature engineering
 The supervised target is explicit: for horizon `h`, the target is
 `BikeCount.shift(-h)`, i.e. `BikeCount(t+h)`.
 
-Calendar and weather features describe the target hour `t+h`, because those
-columns are available for each row in the challenge file. BikeCount lag
-features are restricted to values known at forecast origin `t` or earlier.""")
+Calendar and weather features describe the target hour `t+h`. For weather, this
+is an explicit exogenous-input assumption: target-hour weather variables are
+treated as available at prediction time, either from the provided test data
+structure or from short-term weather forecasts.
+
+This assumption is **not** applied to BikeCount. BikeCount lag features are
+restricted to values known at forecast origin `t` or earlier.""")
 
 co("""def weather_bucket(value):
     text = str(value).lower()

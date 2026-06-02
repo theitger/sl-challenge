@@ -25,6 +25,10 @@ neural-network model.
 - **Features:** target-hour calendar (raw + cyclical sin/cos, `is_weekend`),
   target-hour weather mapped to 7 robust keyword buckets, weather measurements,
   BikeCount lags, and rolling means.
+- **Weather availability assumption:** target-hour weather variables are treated
+  as exogenous inputs available at prediction time, either because the challenge
+  test file provides them or because short-term weather forecasts would be
+  available in production. This assumption is **not** applied to `BikeCount`.
 - **Cleaning:** exactly one corrupt row (`Weather Condition Null`, all-NaN, and
   also the only duplicate timestamp) is removed → 8759 rows.
 - **Validation / selection:** model selection runs on **leakage-free
@@ -82,10 +86,11 @@ TEST_PATH = "path/to/hidden_test_file.xlsx"
 and re-run the final section. While `TEST_PATH = None`, the notebook refuses to
 print fake test scores.
 
-## Open / TODO (your input wanted here)
+## Open / TODO
 
-- [ ] **Slides** (2): approach + results. Numbers above are ready to use as
-      validation numbers until the hidden test set is available.
+- [x] **Slides** (2): approach + results. Slide 2 uses rolling-origin CV mean
+      MSE; hidden-test MSE still needs to be inserted on June 3rd after running
+      the provided file.
 - [x] **Per-horizon XGBoost tuning** — added and backtested (see Results note).
       Marginal for pass/fail, but a clean methodology point for the approach slide.
 - [x] **Selection on rolling-origin time-series CV** — model selection moved from
