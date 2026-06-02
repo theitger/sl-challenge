@@ -280,15 +280,83 @@ def mse_rmse(y_true, y_pred):
 """)
 
 
-md("""## 6. Validation results
+md("""## 6. Model selection — leakage-free rolling-origin cross-validation
 
-We use a temporal holdout: the last 61 days are validation data. A random split
-would mix future and past observations and is inappropriate for this time
-series task.""")
+We select each per-horizon model with **expanding-window rolling-origin
+time-series cross-validation**: at every origin we train only on the past and
+score the next 14-day block, then average MSE over all windows.
 
-co("""def evaluate_validation(df, validation_days=VALIDATION_DAYS):
+Why not random k-fold? The lag and rolling-mean features mean a random split
+would put future bike counts into the training folds and leak the target — the
+score would be optimistic and meaningless. Why CV over a single holdout for
+*selection*? A single holdout is one draw and high-variance; averaging over many
+origins gives a lower-variance, season-robust selection criterion. That matters
+because the hidden test set spans a range similar to the public data (multiple
+seasons), not just the most recent weeks.
+
+The selection criterion is the **mean MSE across all rolling-origin windows**.""")
+
+co("""CV_BLOCK_DAYS = 14       # length of each rolling test block
+CV_MIN_TRAIN_DAYS = 150  # warm-up before the first origin
+CV_STEP_DAYS = 14        # gap between consecutive origins (non-overlapping blocks)
+
+
+def rolling_origin_cv(df):
     rows = []
+    block = CV_BLOCK_DAYS * 24
+    min_train = CV_MIN_TRAIN_DAYS * 24
+    step = CV_STEP_DAYS * 24
+
+    for horizon in HORIZONS:
+        X, y, _ = make_supervised_frame(df, horizon)
+        n = len(X)
+        origins = list(range(min_train, n - block + 1, step))
+        for origin in origins:
+            X_train, y_train = X.iloc[:origin], y.iloc[:origin]
+            X_test, y_test = X.iloc[origin:origin + block], y.iloc[origin:origin + block]
+            for name, model in make_models(horizon).items():
+                fitted = clone(model)
+                fitted.fit(X_train, y_train)
+                mse, _ = mse_rmse(y_test, fitted.predict(X_test))
+                rows.append({"Model": name, "Horizon": f"+{horizon}h",
+                             "origin": origin, "MSE": mse})
+        print(f"+{horizon}h: scored {len(origins)} rolling-origin windows")
+
+    return pd.DataFrame(rows)
+
+
+def select_models_cv(cv_long):
     best_models = {}
+    summary_rows = []
+    for horizon in HORIZONS:
+        sub = cv_long[cv_long["Horizon"] == f"+{horizon}h"]
+        agg = sub.groupby("Model")["MSE"].agg(["mean", "median"])
+        best_models[horizon] = agg["mean"].idxmin()  # criterion: mean CV MSE
+        for model_name, stats in agg.iterrows():
+            summary_rows.append({"Model": model_name, "Horizon": f"+{horizon}h",
+                                 "CV mean MSE": stats["mean"], "CV median MSE": stats["median"]})
+    summary = pd.DataFrame(summary_rows).sort_values(["Horizon", "CV mean MSE"]).reset_index(drop=True)
+    return best_models, summary
+
+
+# NOTE: this trains 7 models on every rolling-origin window and takes a few minutes.
+cv_long = rolling_origin_cv(train_df)
+best_model_by_horizon, cv_summary = select_models_cv(cv_long)
+display(cv_summary.round({"CV mean MSE": 1, "CV median MSE": 1}))
+print("Selected model per horizon (min CV mean MSE):", best_model_by_horizon)
+""")
+
+
+md("""## 6b. Holdout as an independent control
+
+As a second, task-shaped check we also report a single temporal holdout (the
+last 61 days). This is **not** used for selection — it only confirms that the
+CV-selected model family holds up on the most recent period and gives an
+intuitive most-recent-window error.""")
+
+co("""def evaluate_holdout(df, validation_days=VALIDATION_DAYS):
+    rows = []
+    holdout_best = {}
 
     for horizon in HORIZONS:
         X, y, supervised = make_supervised_frame(df, horizon)
@@ -314,18 +382,27 @@ co("""def evaluate_validation(df, validation_days=VALIDATION_DAYS):
             candidate.fit(X_train, y_train)
             mse, rmse = mse_rmse(y_val, candidate.predict(X_val))
             rows.append({"Model": name, "Horizon": f"+{horizon}h", "MSE": mse, "RMSE": rmse})
-            fitted[name] = (candidate, mse)
+            fitted[name] = mse
 
-        best_name = min(fitted, key=lambda model_name: fitted[model_name][1])
-        best_models[horizon] = best_name
+        holdout_best[horizon] = min(fitted, key=fitted.get)
 
     results = pd.DataFrame(rows).sort_values(["Horizon", "MSE"]).reset_index(drop=True)
-    return results, best_models
+    return results, holdout_best
 
 
-validation_results, best_model_by_horizon = evaluate_validation(train_df)
-display(validation_results.round({"MSE": 1, "RMSE": 1}))
-print("Best model by horizon:", best_model_by_horizon)
+def model_family(model_name):
+    return model_name.split()[0]  # "XGBoost tuned log1p" -> "XGBoost"
+
+
+holdout_results, holdout_best = evaluate_holdout(train_df)
+display(holdout_results.round({"MSE": 1, "RMSE": 1}))
+print("CV-selected     :", best_model_by_horizon)
+print("Holdout-selected :", holdout_best)
+for horizon in HORIZONS:
+    same_family = model_family(best_model_by_horizon[horizon]) == model_family(holdout_best[horizon])
+    print(f"+{horizon}h: CV and holdout agree on family? "
+          f"{'YES' if same_family else 'NO'} "
+          f"(CV={best_model_by_horizon[horizon]!r}, holdout={holdout_best[horizon]!r})")
 """)
 
 
